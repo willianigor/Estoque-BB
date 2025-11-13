@@ -16,7 +16,10 @@ from typing import Optional, Tuple, List, Dict
 
 import pandas as pd
 import streamlit as st
-import PyPDF2
+try:
+    import pypdf as PyPDF2
+except ImportError:
+    import PyPDF2
 import plotly.express as px
 import plotly.graph_objects as go
 
