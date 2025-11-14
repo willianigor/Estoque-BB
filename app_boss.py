@@ -404,6 +404,18 @@ def stock_value_df(filter_text: Optional[str] = None) -> pd.DataFrame:
     base_sql += " ORDER BY category, subtype, color, size"
     return pd.read_sql_query(base_sql, con, params=params)
 
+def stock_value_positive_df(filter_text: Optional[str] = None) -> pd.DataFrame:
+    """Retorna apenas itens com estoque positivo para cálculo de valor total"""
+    con = get_conn()
+    base_sql = "SELECT sku, category, subtype, color, size, estoque, custo_unitario, valor_estoque FROM stock_value_view WHERE estoque > 0"
+    params = []
+    if filter_text:
+        base_sql += " AND (category LIKE ? OR subtype LIKE ? OR color LIKE ? OR size LIKE ?)"
+        like = f"%{filter_text}%"
+        params = [like, like, like, like]
+    base_sql += " ORDER BY category, subtype, color, size"
+    return pd.read_sql_query(base_sql, con, params=params)
+
 def movements_df(sku_filter: Optional[str] = None, reason: Optional[str] = None, days: Optional[int] = None) -> pd.DataFrame:
     con = get_conn()
     sql = """
@@ -1026,9 +1038,12 @@ elif page == "Estoque Atual":
     df = stock_df(filter_text=filtro if filtro else None, critical_only=apenas_criticos, critical_value=critico)
     
     if not df.empty and 'valor_estoque' in df.columns:
-        valor_total_estoque = df['valor_estoque'].sum()
+        # Calcular apenas itens positivos para o valor total
+        df_positivos = df[df['estoque'] > 0]
+        valor_total_estoque = df_positivos['valor_estoque'].sum()
         total_itens = len(df)
         total_unidades = df['estoque'].sum()
+        total_unidades_positivas = df_positivos['estoque'].sum()
         
         col1, col2, col3, col4 = st.columns(4)
         with col1:
@@ -1038,7 +1053,7 @@ elif page == "Estoque Atual":
         with col3:
             st.metric("Valor total do estoque", f"R$ {valor_total_estoque:,.2f}")
         with col4:
-            custo_medio = valor_total_estoque / total_unidades if total_unidades > 0 else 0
+            custo_medio = valor_total_estoque / total_unidades_positivas if total_unidades_positivas > 0 else 0
             st.metric("Custo médio por unidade", f"R$ {custo_medio:.2f}")
     
     if df.empty:
@@ -1055,9 +1070,15 @@ elif page == "Estoque Atual":
         if 'custo_unitario' in display_df.columns:
             display_df['custo_unitario'] = display_df['custo_unitario'].apply(lambda x: f"R$ {x:,.2f}" if pd.notnull(x) else "R$ 0,00")
         if 'valor_estoque' in display_df.columns:
-            display_df['valor_estoque'] = display_df['valor_estoque'].apply(lambda x: f"R$ {x:,.2f}" if pd.notnull(x) else "R$ 0,00")
+            # Para itens negativos, mostrar valor zero
+            display_df['valor_estoque'] = display_df.apply(
+                lambda x: "R$ 0,00" if x['estoque'] < 0 else f"R$ {x['valor_estoque']:,.2f}", 
+                axis=1
+            )
         
-        st.dataframe(display_df.style.apply(highlight, axis=1), use_container_width=True, hide_index=True)
+        # CORREÇÃO: Resetar índice para evitar erro de índice duplicado
+        display_df_reset = display_df.reset_index(drop=True)
+        st.dataframe(display_df_reset.style.apply(highlight, axis=1), use_container_width=True, hide_index=True)
         
         total_criticos = len(df[df["estoque"] <= critico])
         total_negativos = len(df[df["estoque"] < 0])
@@ -1325,42 +1346,78 @@ elif page == "Contagem de Estoque":
                 record_movement(sku, int(delta), "ajuste")
                 st.success(f"Saldo ajustado. Anterior: {saldo_atual} | Novo: {novo}")
 
-# -------- Valor do Estoque --------
+# -------- Valor do Estoque (CORRIGIDO) --------
 elif page == "Valor do Estoque":
-    st.subheader("💰 Valor Total do Estoque")
-    col1, col2 = st.columns(2)
+    st.subheader("💰 Valor Total do Estoque (Apenas Itens Positivos)")
+    
+    # Adicionar toggle para escolher entre visualização
+    col1, col2, col3 = st.columns([2, 2, 2])
     with col1:
         filtro_categoria = st.text_input("Filtrar por categoria", placeholder="Ex: moletom, camiseta")
     with col2:
         filtro_subtipo = st.text_input("Filtrar por subtipo", placeholder="Ex: canguru, careca")
+    with col3:
+        mostrar_negativos = st.checkbox("Mostrar itens negativos", value=False, 
+                                       help="Mostra itens com estoque negativo (não afetam o valor total)")
     
-    df_estoque = stock_value_df()
+    # Obter dados (apenas positivos para cálculos)
+    df_positivo = stock_value_positive_df()
+    
+    # Aplicar filtros
     if filtro_categoria:
-        df_estoque = df_estoque[df_estoque['category'].str.contains(filtro_categoria, case=False, na=False)]
+        df_positivo = df_positivo[df_positivo['category'].str.contains(filtro_categoria, case=False, na=False)]
     if filtro_subtipo:
-        df_estoque = df_estoque[df_estoque['subtype'].str.contains(filtro_subtipo, case=False, na=False)]
+        df_positivo = df_positivo[df_positivo['subtype'].str.contains(filtro_subtipo, case=False, na=False)]
     
-    if df_estoque.empty:
+    # Obter dados completos se necessário para mostrar negativos
+    if mostrar_negativos:
+        df_completo = stock_value_df()
+        if filtro_categoria:
+            df_completo = df_completo[df_completo['category'].str.contains(filtro_categoria, case=False, na=False)]
+        if filtro_subtipo:
+            df_completo = df_completo[df_completo['subtype'].str.contains(filtro_subtipo, case=False, na=False)]
+        df_negativo = df_completo[df_completo['estoque'] < 0]
+    else:
+        df_negativo = pd.DataFrame()
+    
+    if df_positivo.empty and (not mostrar_negativos or df_negativo.empty):
         st.info("Nenhum item encontrado com os filtros aplicados.")
     else:
-        valor_total = df_estoque['valor_estoque'].sum()
-        total_itens = len(df_estoque)
-        total_unidades = df_estoque['estoque'].sum()
+        # Calcular totais CORRETOS (apenas positivos)
+        valor_total = df_positivo['valor_estoque'].sum()
+        total_itens_positivos = len(df_positivo)
+        total_unidades_positivas = df_positivo['estoque'].sum()
+        
+        # Estatísticas de negativos
+        total_itens_negativos = len(df_negativo) if mostrar_negativos else 0
+        total_unidades_negativas = abs(df_negativo['estoque'].sum()) if mostrar_negativos and not df_negativo.empty else 0
         
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("Valor Total do Estoque", f"R$ {valor_total:,.2f}")
         with col2:
-            st.metric("Total de Itens", total_itens)
+            st.metric("Itens com Estoque Positivo", total_itens_positivos)
         with col3:
-            st.metric("Total de Unidades", total_unidades)
+            st.metric("Unidades em Estoque", f"{total_unidades_positivas:,.0f}")
         with col4:
-            custo_medio = valor_total / total_unidades if total_unidades > 0 else 0
+            custo_medio = valor_total / total_unidades_positivas if total_unidades_positivas > 0 else 0
             st.metric("Custo Médio por Unidade", f"R$ {custo_medio:.2f}")
         
+        # Alertas para itens negativos
+        if total_itens_negativos > 0:
+            st.warning(f"⚠️ **Atenção:** {total_itens_negativos} itens com estoque negativo ({total_unidades_negativas} unidades em falta)")
+            
+            # Mostrar itens negativos em uma tabela expandida
+            with st.expander("📋 Ver Itens com Estoque Negativo"):
+                df_negativo_display = df_negativo.copy()
+                df_negativo_display['estoque'] = df_negativo_display['estoque'].astype(int)
+                df_negativo_display['valor_estoque'] = "R$ 0,00"
+                st.dataframe(df_negativo_display[['sku', 'category', 'subtype', 'color', 'size', 'estoque']], 
+                           use_container_width=True)
+        
         st.divider()
-        st.subheader("Valor por Categoria/Subtipo")
-        df_agrupado = df_estoque.groupby(['category', 'subtype']).agg({
+        st.subheader("Valor por Categoria/Subtipo (Apenas Positivos)")
+        df_agrupado = df_positivo.groupby(['category', 'subtype']).agg({
             'estoque': 'sum',
             'valor_estoque': 'sum',
             'sku': 'count'
@@ -1372,12 +1429,36 @@ elif page == "Valor do Estoque":
         
         st.divider()
         st.subheader("Detalhamento Completo do Estoque")
-        detalhado = df_estoque.copy()
-        detalhado['custo_unitario'] = detalhado['custo_unitario'].apply(lambda x: f"R$ {x:,.2f}")
-        detalhado['valor_estoque'] = detalhado['valor_estoque'].apply(lambda x: f"R$ {x:,.2f}")
-        st.dataframe(detalhado, use_container_width=True)
         
-        csv = df_estoque.to_csv(index=False).encode('utf-8')
+        # Preparar dados para exibição
+        if mostrar_negativos:
+            df_exibicao = pd.concat([df_positivo, df_negativo]).sort_values(['category', 'subtype', 'color', 'size'])
+        else:
+            df_exibicao = df_positivo
+        
+        # Função para destacar itens negativos
+        def highlight_negative(row):
+            if row['estoque'] < 0:
+                return ['background-color: #ffcccc'] * len(row)
+            return [''] * len(row)
+        
+        detalhado = df_exibicao.copy()
+        detalhado['custo_unitario'] = detalhado['custo_unitario'].apply(lambda x: f"R$ {x:,.2f}" if pd.notnull(x) else "R$ 0,00")
+        # Para itens negativos, mostrar valor zero
+        detalhado['valor_estoque'] = detalhado.apply(
+            lambda x: "R$ 0,00" if x['estoque'] < 0 else f"R$ {x['valor_estoque']:,.2f}", 
+            axis=1
+        )
+        
+        # CORREÇÃO: Resetar o índice para evitar o erro de índice duplicado
+        detalhado_reset = detalhado.reset_index(drop=True)
+        
+        # Aplicar o estilo no DataFrame com índice resetado
+        styled_df = detalhado_reset.style.apply(highlight_negative, axis=1)
+        st.dataframe(styled_df, use_container_width=True)
+        
+        # Exportar dados
+        csv = df_exibicao.to_csv(index=False).encode('utf-8')
         st.download_button("📥 Exportar Dados de Valor do Estoque (CSV)", csv, "valor_estoque.csv", "text/csv")
 
 # -------- Gráfico de Vendas --------
