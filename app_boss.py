@@ -1,5 +1,5 @@
 # ==========================================
-# Controle de Estoque — JIOR BLANC
+# Controle de Estoque — BOSS BLANC
 # Streamlit + SQLite Persistente
 # ==========================================
 import os
@@ -784,6 +784,14 @@ elif page == "Movimentar Estoque":
     else:
         qty_final = qtd_input if reason == "entrada" else -qtd_input
     
+    # NOVA VERIFICAÇÃO: Calcular se faltará estoque
+    faltara = 0
+    if qty_final < 0 and estoque_atual is not None:
+        quantidade_venda = abs(qty_final)
+        if quantidade_venda > estoque_atual:
+            faltara = quantidade_venda - estoque_atual
+            st.warning(f"⚠ **Atenção:** Esta venda excede o estoque! Faltará: **{faltara} unidade(s)**")
+    
     st.caption(f"Quantidade aplicada: **{qty_final}** (motivo: **{reason}**)")
     
     if st.button("Registrar movimentação", type="primary"):
@@ -793,19 +801,34 @@ elif page == "Movimentar Estoque":
             st.error("Quantidade não pode ser zero.")
         else:
             try:
-                record_movement(sku, int(qty_final), reason)
+                # NOVA LÓGICA: Se for venda e exceder estoque, ajustar para vender apenas o disponível
+                quantidade_a_registrar = qty_final
+                if reason in ["venda", "venda_pdf"] and estoque_atual is not None and abs(qty_final) > estoque_atual:
+                    quantidade_a_registrar = -estoque_atual  # Vende apenas o que tem
+                    st.info(f"**Ajustado:** Vendendo apenas {estoque_atual} unidades (estoque disponível)")
+                
+                record_movement(sku, int(quantidade_a_registrar), reason)
                 novo_df_sku = stock_df(filter_text=sku)
                 try:
                     novo_estoque = int(novo_df_sku.loc[novo_df_sku["sku"] == sku, "estoque"].values[0])
                 except Exception:
-                    novo_estoque = (estoque_atual or 0) + int(qty_final)
-                st.success(
-                    f"Movimentação registrada: {sku} => {qty_final} ({reason}). "
-                    f"Estoque: {estoque_atual} → **{novo_estoque}**."
-                )
+                    novo_estoque = (estoque_atual or 0) + int(quantidade_a_registrar)
+                
+                if faltara > 0:
+                    st.success(
+                        f"Movimentação registrada: {sku} => {quantidade_a_registrar} ({reason}). "
+                        f"Estoque: {estoque_atual} → **{novo_estoque}**. "
+                        f"**Faltou vender: {faltara} unidade(s)**"
+                    )
+                else:
+                    st.success(
+                        f"Movimentação registrada: {sku} => {quantidade_a_registrar} ({reason}). "
+                        f"Estoque: {estoque_atual} → **{novo_estoque}**."
+                    )
             except Exception as e:
                 st.error(str(e))
 
+# -------- Baixa por PDF (usa processar_pdf_vendas) --------
 # -------- Baixa por PDF (usa processar_pdf_vendas) --------
 elif page == "Baixa por PDF":
     st.subheader("Baixa por PDF (layout UpSeller)")
@@ -863,12 +886,13 @@ elif page == "Baixa por PDF":
             map_estoque = {str(row["sku"]): int(row["estoque"]) for _, row in df_estoque_atual.iterrows()}
             
             preview = edited.copy()
-            
+
             def to_original_if_possible(sku_val: str) -> str:
                 s = str(sku_val or "")
                 s_san = sanitize_sku(s)
                 return sku_san_to_orig.get(s_san, s)
             
+            # Criar as colunas do preview na ordem correta
             preview["SKU (PDF)"] = preview.get("sku_pdf", "")
             preview["SKU (no estoque)"] = preview.get("sku", "").map(to_original_if_possible)
             preview["Qtd. (PDF)"] = preview.get("quantidade", 0).astype(int)
@@ -883,42 +907,64 @@ elif page == "Baixa por PDF":
                 preview["SKU (no estoque)"].map(lambda s: map_estoque.get(str(s), 0)).fillna(0).astype(int)
             )
             
-            preview["Estoque após (simulado)"] = preview["Estoque atual (antes)"] - preview["Qtd. (usada)"]
+            # REMOVIDO: preview["Estoque após (simulado)"] = preview["Estoque atual (antes)"] - preview["Qtd. (usada)"]
             
-            # Status textual
-            def status_row(after: int) -> str:
-                if after < 0:
-                    return "FICA NEGATIVO"
-                if after == 0:
+            # Criar coluna "Faltará" - quantas unidades não poderão ser vendidas por falta de estoque
+            preview["Faltará"] = (preview["Qtd. (usada)"] - preview["Estoque atual (antes)"]).clip(lower=0)
+            
+            # Calcular quantas unidades SERÃO efetivamente vendidas (não pode ser negativo)
+            preview["Será vendido"] = preview["Qtd. (usada)"] - preview["Faltará"]
+            
+            # Status textual baseado no que faltará
+            def status_row(row):
+                faltara = row["Faltará"]
+                sera_vendido = row["Será vendido"]
+                estoque_atual = row["Estoque atual (antes)"]
+                
+                if faltara > 0:
+                    return f"FALTARÁ VENDER {faltara}"
+                elif sera_vendido == estoque_atual:
                     return "ZERA ESTOQUE"
-                return "OK"
+                else:
+                    return "OK"
             
-            preview["Status"] = preview["Estoque após (simulado)"].apply(status_row)
+            preview["Status"] = preview.apply(status_row, axis=1)
             
             # Flag de quantidades muito altas com base na Qtd. (usada)
             preview["Qtd muito alta?"] = preview["Qtd. (usada)"] > HIGH_QTY_THRESHOLD
             
             cols_preview = [
-                "SKU (PDF)", "SKU (no estoque)", "Qtd. (PDF)", "Qtd. (usada)", "Estoque atual (antes)", "Estoque após (simulado)", "Status", "Qtd muito alta?"
+                "SKU (PDF)", "SKU (no estoque)", "Qtd. (PDF)", "Qtd. (usada)", 
+                "Estoque atual (antes)", "Será vendido", "Faltará", "Status", "Qtd muito alta?"
             ]
             preview = preview[cols_preview]
             
             # Destaques visuais
             def hl_simulado(row):
                 styles = [""] * len(row)
-                after = row.get("Estoque após (simulado)", 0)
-                if after < 0:
-                    styles = ["background-color: #ffcccc"] * len(row) # vermelho
-                elif after == 0:
-                    styles = ["background-color: #fff2cc"] * len(row) # amarelo
-                if bool(row.get("Qtd muito alta?", False)):
-                    styles = ["background-color: #ffe5b4"] * len(row) # laranja claro
+                try:
+                    faltara = row.get("Faltará", 0)
+                    sera_vendido = row.get("Será vendido", 0)
+                    estoque_atual = row.get("Estoque atual (antes)", 0)
+                    qtd_alta = row.get("Qtd muito alta?", False)
+                    
+                    # Se faltará vender algum item
+                    if faltara > 0:
+                        styles = ["background-color: #ff9966"] * len(row)  # laranja para itens que faltarão
+                    # Se zera o estoque
+                    elif sera_vendido == estoque_atual:
+                        styles = ["background-color: #fff2cc"] * len(row)  # amarelo para itens que zeram estoque
+                    # Quantidade muito alta
+                    if qtd_alta:
+                        styles = ["background-color: #ffe5b4"] * len(row)  # laranja claro
+                except:
+                    pass
                 return styles
             
-            show_only_critical = st.toggle("Mostrar apenas itens que zeram/ficam negativos", value=False)
+            show_only_critical = st.toggle("Mostrar apenas itens que faltarão/zeram estoque", value=False)
             filtered_preview = preview.copy()
             if show_only_critical:
-                mask_crit = filtered_preview["Estoque após (simulado)"] <= 0
+                mask_crit = (filtered_preview["Faltará"] > 0) | (filtered_preview["Será vendido"] == filtered_preview["Estoque atual (antes)"])
                 filtered_preview = filtered_preview[mask_crit]
                 st.caption(f"Exibindo {len(filtered_preview)} de {len(preview)} itens (apenas críticos).")
             
@@ -943,12 +989,15 @@ elif page == "Baixa por PDF":
                     st.error("Há linhas com 'Qtd. corrigida' inválida (<= 0). Corrija antes de simular.")
                 else:
                     total_itens = len(preview)
-                    vai_negativo = int((preview["Estoque após (simulado)"] < 0).sum())
-                    vai_zerar = int((preview["Estoque após (simulado)"] == 0).sum())
-                    total_qtd = int(preview["Qtd. (usada)"].sum())
+                    total_faltara = int(preview["Faltará"].sum())
+                    total_sera_vendido = int(preview["Será vendido"].sum())
+                    total_qtd_solicitada = int(preview["Qtd. (usada)"].sum())
+                    
                     st.info(
-                        f"Simulação: {total_itens} linhas | Total de peças (usadas): {total_qtd} | "
-                        f"Zera estoque: {vai_zerar} | Fica negativo: {vai_negativo}"
+                        f"Simulação: {total_itens} linhas | "
+                        f"Total solicitado: {total_qtd_solicitada} | "
+                        f"Será vendido: {total_sera_vendido} | "
+                        f"Faltará vender: {total_faltara}"
                     )
             
             grava_map = st.checkbox("Salvar/atualizar mapeamentos sku_pdf → sku (para os itens com SKU preenchido)", value=True)
@@ -974,11 +1023,19 @@ elif page == "Baixa por PDF":
                 mapeados = 0
                 erros = 0
                 faltando = 0
+                total_faltou_vender = 0
                 
                 for _, r in edited.iterrows():
-                    sku_pdf = sanitize_sku(str(r.get("sku_pdf", ""))) # usar corrigida; se faltar, cai na lida
-                    qtd = int(r.get("quantidade_corrigida", r.get("quantidade", 0)) or 0)
-                    sku_user = str(r.get("sku", "")) # pode vir já correto
+                    sku_pdf = sanitize_sku(str(r.get("sku_pdf", "")))
+                    
+                    # CORREÇÃO: Pegar quantidade corretamente
+                    qtd_corrigida = r.get("quantidade_corrigida!")
+                    if pd.isna(qtd_corrigida) or qtd_corrigida is None:
+                        qtd = int(r.get("quantidade", 0) or 0)
+                    else:
+                        qtd = int(qtd_corrigida)
+                    
+                    sku_user = str(r.get("sku", ""))
                     sku_est_sanit = sanitize_sku(sku_user)
                     
                     if not sku_est_sanit:
@@ -991,9 +1048,19 @@ elif page == "Baixa por PDF":
                     
                     sku_original = sku_san_to_orig[sku_est_sanit]
                     
+                    # NOVA LÓGICA: Verificar estoque atual e ajustar quantidade se necessário
+                    estoque_atual_item = map_estoque.get(sku_original, 0)
+                    quantidade_a_baixar = min(qtd, estoque_atual_item)  # Baixa no máximo o estoque disponível
+                    faltara_item = max(0, qtd - estoque_atual_item)
+                    
                     try:
-                        record_movement(sku_original, -abs(qtd), "venda_pdf")
-                        ok_count += 1
+                        if quantidade_a_baixar > 0:  # Só registra se houver algo para baixar
+                            record_movement(sku_original, -quantidade_a_baixar, "venda_pdf")
+                            ok_count += 1
+                            
+                            if faltara_item > 0:
+                                total_faltou_vender += faltara_item
+                                st.warning(f"SKU {sku_original}: Baixadas {quantidade_a_baixar} unidades (faltou baixar {faltara_item})")
                         
                         if grava_map and sku_pdf:
                             try:
@@ -1009,10 +1076,11 @@ elif page == "Baixa por PDF":
                     except Exception:
                         erros += 1
                 
-                st.success(
-                    f"Baixas aplicadas! OK: {ok_count} | Mapeamentos salvos: {mapeados} | "
-                    f"Sem SKU preenchido: {faltando} | Erros: {erros}"
-                )
+                mensagem_sucesso = f"Baixas aplicadas! OK: {ok_count} | Mapeamentos salvos: {mapeados} | Sem SKU preenchido: {faltando} | Erros: {erros}"
+                if total_faltou_vender > 0:
+                    mensagem_sucesso += f" | Total que faltou vender: {total_faltou_vender} unidades"
+                
+                st.success(mensagem_sucesso)
             
             st.divider()
             # Exporta exatamente o que está na grade (inclui quantidade_corrigida)
