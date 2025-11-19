@@ -162,32 +162,74 @@ def sanitized_to_original_sku_map() -> Dict[str, str]:
 # ==========================================
 # CRUD Operations
 # ==========================================
-def get_or_create_product(category: str, subtype: str, sku_base: Optional[str] = None, custo_unitario: float = 0) -> int:
+def get_or_create_product(category: str, subtype: str, sku_base: Optional[str] = None, custo_unitario: Optional[float] = None) -> int:
+    """
+    Regra:
+    - Se o produto NÃO existir: cria e pode receber custo_unitario (se fornecido).
+    - Se o produto JÁ existir:
+        - Atualiza sku_base SE sku_base for passado (não None).
+        - Atualiza custo_unitario SÓ se custo_unitario for passado (não None).
+        - Se custo_unitario for None, NÃO mexe no custo já cadastrado.
+    """
     con = get_conn()
     cur = con.cursor()
-    cur.execute("SELECT id FROM products WHERE category=? AND subtype=?", (category.strip(), subtype.strip()))
+    cur.execute(
+        "SELECT id FROM products WHERE category=? AND subtype=?",
+        (category.strip(), subtype.strip())
+    )
     row = cur.fetchone()
+
+    # Já existe
     if row:
-        if sku_base is not None or custo_unitario is not None:
-            try:
-                cur.execute("UPDATE products SET sku_base=?, custo_unitario=? WHERE id=?", 
-                           (sku_base.strip() if sku_base else None, custo_unitario if custo_unitario is not None else 0, row[0]))
-                con.commit()
-            except sqlite3.OperationalError:
-                pass
+        updates = []
+        params = []
+
+        # Atualiza SKU base se foi informado algo (pode ser string vazia para limpar)
+        if sku_base is not None:
+            updates.append("sku_base = ?")
+            params.append(sku_base.strip() if sku_base else None)
+
+        # Só atualiza custo se foi passado explicitamente
+        if custo_unitario is not None:
+            updates.append("custo_unitario = ?")
+            params.append(float(custo_unitario))
+
+        if updates:
+            params.append(row[0])
+            cur.execute(
+                f"UPDATE products SET {', '.join(updates)} WHERE id = ?",
+                params
+            )
+            con.commit()
+
         return row[0]
+
+    # Não existe: criar
     try:
-        cur.execute("INSERT INTO products(category, subtype, sku_base, custo_unitario) VALUES(?,?,?,?)",
-                   (category.strip(), subtype.strip(), sku_base.strip() if sku_base else None, custo_unitario or 0))
+        cur.execute(
+            "INSERT INTO products(category, subtype, sku_base, custo_unitario) VALUES(?,?,?,?)",
+            (
+                category.strip(),
+                subtype.strip(),
+                sku_base.strip() if sku_base else None,
+                float(custo_unitario) if custo_unitario is not None else 0.0
+            )
+        )
     except sqlite3.OperationalError:
-        cur.execute("INSERT INTO products(category, subtype) VALUES(?,?)", (category.strip(), subtype.strip()))
+        # Banco antigo sem coluna de custo / sku_base
+        cur.execute(
+            "INSERT INTO products(category, subtype) VALUES(?,?)",
+            (category.strip(), subtype.strip())
+        )
+
     con.commit()
     return cur.lastrowid
+
 
 def create_variant(category: str, subtype: str, color: str, size: str, sku_base: Optional[str] = None, sku_override: Optional[str] = None, custo_unitario_produto: float = 0, custo_unitario_variante: Optional[float] = None) -> Tuple[bool, str]:
     con = get_conn()
     cur = con.cursor()
-    product_id = get_or_create_product(category, subtype, sku_base, custo_unitario_produto or 0)
+    product_id = get_or_create_product(category, subtype, sku_base)
     
     if not sku_base:
         try:
@@ -241,7 +283,7 @@ def update_variant(old_sku: str, new_sku: str, category: str, subtype: str, colo
             if cur.fetchone():
                 return False, "Novo SKU já existe no sistema."
         
-        new_product_id = get_or_create_product(category, subtype, sku_base, custo_unitario_produto if custo_unitario_produto is not None else 0)
+        new_product_id = get_or_create_product(category, subtype, sku_base)
         cur.execute("UPDATE variants SET sku=?, color=?, size=?, product_id=?, custo_unitario=? WHERE id=?",
                    (new_sku, color.strip(), size.strip(), new_product_id, float(custo_unitario_variante) if custo_unitario_variante is not None else None, variant_id))
         
@@ -1029,7 +1071,7 @@ elif page == "Baixa por PDF":
                     sku_pdf = sanitize_sku(str(r.get("sku_pdf", "")))
                     
                     # CORREÇÃO: Pegar quantidade corretamente
-                    qtd_corrigida = r.get("quantidade_corrigida!")
+                    qtd_corrigida = r.get("quantidade_corrigida")
                     if pd.isna(qtd_corrigida) or qtd_corrigida is None:
                         qtd = int(r.get("quantidade", 0) or 0)
                     else:
