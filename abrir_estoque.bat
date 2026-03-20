@@ -17,7 +17,7 @@ if exist app_boss.py (
     echo Para fechar: Ctrl+C no terminal
     echo ===============================
     echo.
-    streamlit run app_boss.py
+    py -m streamlit run app_boss.py
 ) else (
     echo ERRO: Arquivo app_boss.py nao encontrado!
     echo Verifique o caminho: C:\Users\Rafael Cintra\Desktop\Estoque - Teste
