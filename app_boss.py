@@ -572,7 +572,7 @@ def processar_pdf_vendas(pdf_file) -> Tuple[bool, List[dict], str]:
         preface_size_start = re.compile(rf"^(?:{SIZE})(?=(?:[A-Z]{{2,}}(?:-[A-Z]{{2,}}){{0,2}})-)")
         preface_size_after_comma = re.compile(rf",(?:{SIZE})(?=(?:[A-Z]{{2,}}(?:-[A-Z]{{2,}}){{0,2}})-)")
         size_suffix_re = re.compile(rf"^(.*-)(XGG|GG|XG|PP|G|M|P|\d{{1,3}})$")
-        recognized_sizes = {'4','6','8','10','12','14','16','P','M','G','GG','PP','XG','XGG'}
+        recognized_sizes = {'2','4','6','8','10','12','14','16','P','M','G','GG','PP','XG','XGG'}
         
         def norm(s: str) -> str:
             s = s.upper()
